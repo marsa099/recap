@@ -41,8 +41,16 @@ ORANGE, RED, YELLOW, BLUE = _c("38;5;208"), _c("31"), _c("33"), _c("34")
 
 
 def cmd_refresh(args):
-    items, meta = [], {}
+    # `--only` re-runs a subset and keeps everything else from the existing
+    # snapshot. That is what makes a live watcher affordable: a mail change
+    # must not trigger a 2-minute `npm audit` sweep.
+    only = set(args.only.split(",")) if getattr(args, "only", "") else None
+    prev = snapshot.load_snapshot() if only else {"items": [], "meta": {}}
+    items = [i for i in prev["items"] if i["source"].split(":")[0] not in only] if only else []
+    meta = dict(prev["meta"]) if only else {}
     for name, mod in PROVIDERS:
+        if only and name not in only:
+            continue
         t0 = time.time()
         try:
             res = mod.collect(force=args.force) if name == "security" else mod.collect()
@@ -57,9 +65,10 @@ def cmd_refresh(args):
             print(f"  {name:<9} {len(got):>3} items  {int((time.time()-t0)*1000):>5}ms  {note}",
                   file=sys.stderr)
 
-    got, note = addons.collect()
-    items.extend(got)
-    meta["addons"] = {"note": note, "count": len(got), "ms": 0}
+    if not only or "addons" in only:
+        got, note = addons.collect()
+        items.extend(got)
+        meta["addons"] = {"note": note, "count": len(got), "ms": 0}
 
     items = snapshot.apply_state(items)
     order = {s: i for i, s in enumerate(item.SECTION_ORDER)}
@@ -199,6 +208,8 @@ def main():
     r = sub.add_parser("refresh", help="run providers, write the snapshot")
     r.add_argument("--force", action="store_true", help="ignore caches (re-audit everything)")
     r.add_argument("--quiet", "-q", action="store_true")
+    r.add_argument("--only", default="",
+                   help="comma-separated providers to re-run (mail,chat,news,security)")
     r.set_defaults(fn=cmd_refresh)
 
     s = sub.add_parser("show", help="print the cached digest")
@@ -223,6 +234,9 @@ def main():
 
     u = sub.add_parser("undo", help="undo the last action")
     u.set_defaults(fn=cmd_undo)
+
+    w = sub.add_parser("watch", help="keep the snapshot live as clients change state")
+    w.set_defaults(fn=lambda a: __import__("recaplib.watch", fromlist=["run"]).run())
 
     v = sub.add_parser("providers", help="show provider status")
     v.set_defaults(fn=cmd_providers)

@@ -26,7 +26,22 @@ recap providers        # what's wired up, and whether it's reachable
 ```
 
 A systemd user timer (`recap-refresh.timer`, every 15 min) keeps the snapshot
-warm so the overlay never shows a spinner.
+warm so the overlay never shows a spinner, and `recap-watch.service` keeps it
+in step with the clients in between:
+
+```sh
+recap watch                       # react to mlqs/chat state changes, live
+recap refresh --only mail,chat    # re-run a subset, keep the rest
+```
+
+Read an email in mlqs and it leaves the digest within a couple of seconds —
+no waiting for the timer. The watcher keys off mlqs's **SQLite cache**, not its
+`readmarked` broadcast: that broadcast only fires from the notification
+callback, whereas every read/unread/archive/trash goes through
+`db.SetConvFlags` and lands in the cache. Watching the cache therefore catches
+strictly more, with no protocol dependency. Chat sockets are held open read-only
+and re-derive on a fresh `channels` frame. `security` and `news` are never
+re-run by the watcher — reading one mail must not trigger an `npm audit` sweep.
 
 ## Providers
 
