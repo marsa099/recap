@@ -91,7 +91,7 @@ def collect():
                 accent="orange" if mention else accent,
                 score=90 if mention else 55 + min(unread, 30),
                 priority=mention,
-                goto={"kind": "app", "cmd": [f"{source}-open", name]},  # resolved by `recap open`
+                goto={"kind": "app", "cmd": [f"{source}-open", name, str(c.get("id") or "")]},
                 actions=["read"],
             ))
     return out, f"{up}/{len(CLIENTS)} daemons up"

@@ -93,10 +93,25 @@ def open_item(it, dry_run=False):
         matcher, launcher = CHAT_WINDOWS[source]
         if not os.path.exists(launcher):
             return False, f"{os.path.basename(launcher)} missing"
-        chan = (g.get("cmd") or ["", ""])[1] if len(g.get("cmd") or []) > 1 else ""
+        cmd = g.get("cmd") or ["", ""]
+        chan = cmd[1] if len(cmd) > 1 else ""
+        chan_id = cmd[2] if len(cmd) > 2 else ""
         if dry_run:
-            return True, f"[dry] jump {source} ({matcher}) for {chan}"
+            return True, f"[dry] open {source}/{chan or chan_id} + jump ({matcher})"
+        # `open` navigates the running UI to the channel — the same broadcast a
+        # clicked notification produces. Added to dsqrd/slqs/tmqs by us; a
+        # daemon that predates it ignores the unknown verb, so this degrades to
+        # "raise the window" rather than failing.
+        deep = False
+        if chan_id:
+            try:
+                _sock_send(f"{source}.sock", [{"type": "open", "channel": chan_id}])
+                deep = True
+            except OSError:
+                pass
         _spawn([NIRI_JUMP, matcher, launcher])
+        if deep:
+            return True, f"opening {source} → {chan}"
         return True, f"opening {source}" + (f" — select {chan} yourself" if chan else "")
 
     return False, f"don't know how to open a {source} row"
