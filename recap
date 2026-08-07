@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""recap — one digest of everything that happened while you weren't looking.
+
+    recap refresh [--force]   run every provider, write the snapshot
+    recap show [--lane L]     print the cached digest as text
+    recap json                print the raw snapshot (what the QML reads)
+    recap act <id> <action>   read | archive | trash | star  (+ undo)
+    recap undo                undo the last action
+    recap providers           what's wired up and whether it's reachable
+
+The overlay in qs-picker only ever reads the snapshot and shells out to
+`recap act`, so everything here is testable from a terminal with no UI.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from recaplib import addons, item, snapshot  # noqa: E402
+from recaplib.providers import chat, mail, news, security  # noqa: E402
+
+PROVIDERS = [
+    ("mail", mail),
+    ("chat", chat),
+    ("security", security),
+    ("news", news),
+]
+
+# ANSI, only when stdout is a tty.
+def _c(code):
+    return f"\033[{code}m" if sys.stdout.isatty() else ""
+
+
+DIM, BOLD, RESET = _c("2"), _c("1"), _c("0")
+ORANGE, RED, YELLOW, BLUE = _c("38;5;208"), _c("31"), _c("33"), _c("34")
+
+
+def cmd_refresh(args):
+    items, meta = [], {}
+    for name, mod in PROVIDERS:
+        t0 = time.time()
+        try:
+            res = mod.collect(force=args.force) if name == "security" else mod.collect()
+            got, note = res if isinstance(res, tuple) else (res, "")
+        except Exception as e:  # a broken provider must not sink the refresh
+            got, note = [item.stale_notice(
+                name, name.capitalize(), item.PRIVATE,
+                f"{name} provider crashed", f"{e.__class__.__name__}: {e}")], "crashed"
+        items.extend(got)
+        meta[name] = {"note": note, "count": len(got), "ms": int((time.time() - t0) * 1000)}
+        if not args.quiet:
+            print(f"  {name:<9} {len(got):>3} items  {int((time.time()-t0)*1000):>5}ms  {note}",
+                  file=sys.stderr)
+
+    got, note = addons.collect()
+    items.extend(got)
+    meta["addons"] = {"note": note, "count": len(got), "ms": 0}
+
+    items = snapshot.apply_state(items)
+    order = {s: i for i, s in enumerate(item.SECTION_ORDER)}
+    items.sort(key=lambda x: (order.get(x["section"], 99), item.sort_key(x)))
+    snapshot.save_snapshot(items, meta)
+    if not args.quiet:
+        print(f"  {'total':<9} {len(items):>3} items -> {snapshot.SNAPSHOT}", file=sys.stderr)
+    return 0
+
+
+def cmd_show(args):
+    snap = snapshot.load_snapshot()
+    items = snap["items"]
+    if not items:
+        print("empty snapshot — run `recap refresh`")
+        return 1
+    if args.lane:
+        items = [i for i in items if i["lane"] == args.lane]
+
+    age = int(time.time() - snap["generated"])
+    age_s = f"{age // 60}m" if age >= 60 else f"{age}s"
+    unread = sum(1 for i in items if not i["state"].get("read"))
+    print(f"{BOLD}RECAP{RESET}  {DIM}{time.strftime('%A, %B %-d')} · "
+          f"{unread} unread · refreshed {age_s} ago{RESET}\n")
+
+    section = None
+    for it in items:
+        if it["section"] != section:
+            section = it["section"]
+            note = (snap["meta"].get(it["source"].split(":")[0], {}) or {}).get("note", "")
+            print(f"{DIM}{'─' * 3}{RESET} {BOLD}{section.upper()}{RESET} {DIM}{note}{RESET}")
+        col = {"red": RED, "yellow": YELLOW, "orange": ORANGE}.get(it["accent"], BLUE)
+        mark = f"{col}▸{RESET} " if it["priority"] else "  "
+        read = f"{DIM}✓{RESET}" if it["state"].get("read") else " "
+        lane = "W" if it["lane"] == item.WORK else "P"
+        print(f" {read}{mark}{DIM}{lane}{RESET} {it['title']}")
+        gut = " · ".join(x for x in (it["who"], it["sub"]) if x)
+        print(f"      {DIM}{gut}{'  ·  ' + it['when'] if it['when'] else ''}{RESET}")
+        if it["summary"] and not args.brief:
+            for line in _wrap(it["summary"], 76):
+                print(f"      {line}")
+        if args.ids:
+            print(f"      {DIM}id {it['id']}{RESET}")
+        print()
+    return 0
+
+
+def _wrap(text, width):
+    words, line, out = text.split(), "", []
+    for w in words:
+        if len(line) + len(w) + 1 > width:
+            out.append(line)
+            line = w
+        else:
+            line = f"{line} {w}".strip()
+    if line:
+        out.append(line)
+    return out
+
+
+def cmd_json(args):
+    import json
+    json.dump(snapshot.load_snapshot(), sys.stdout, ensure_ascii=False, indent=2)
+    print()
+    return 0
+
+
+def cmd_act(args):
+    snap = snapshot.load_snapshot()
+    it = next((i for i in snap["items"] if i["id"] == args.id), None)
+    if not it:
+        print(f"no item {args.id} in the snapshot", file=sys.stderr)
+        return 1
+
+    field = {"read": "read", "star": "starred",
+             "trash": "gone", "archive": "gone"}.get(args.action)
+    if not field:
+        print(f"unknown action {args.action}", file=sys.stderr)
+        return 1
+
+    # Record locally first so the UI can update instantly, then push upstream.
+    new = True if field != "read" else not it["state"].get("read")
+    snapshot.set_item_state(it["id"], field, new)
+
+    mod = {"mail": mail, "chat": chat, "security": security}.get(it["source"].split(":")[0])
+    ok, note = (True, "local only")
+    if mod and hasattr(mod, "act"):
+        try:
+            ok, note = mod.act(it, args.action)
+        except Exception as e:
+            ok, note = False, f"{e.__class__.__name__}: {e}"
+    if not ok:
+        snapshot.undo_last()  # roll the optimistic update back
+        print(f"failed: {note}", file=sys.stderr)
+        return 1
+    print(note)
+    return 0
+
+
+def cmd_undo(args):
+    last = snapshot.undo_last()
+    if not last:
+        print("nothing to undo")
+        return 1
+    print(f"undid {last['field']} on {last['id']}")
+    return 0
+
+
+def cmd_providers(args):
+    print(f"{BOLD}providers{RESET}")
+    snap = snapshot.load_snapshot()
+    for name, _ in PROVIDERS + [("addons", None)]:
+        m = snap["meta"].get(name, {})
+        print(f"  {name:<10} {m.get('count', '-'):>4} items  {m.get('ms', 0):>5}ms  "
+              f"{DIM}{m.get('note', 'never run')}{RESET}")
+    print(f"\n{DIM}snapshot: {snapshot.SNAPSHOT}{RESET}")
+    print(f"{DIM}addons:   {addons.DIR}{RESET}")
+    return 0
+
+
+def main():
+    p = argparse.ArgumentParser(prog="recap", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    r = sub.add_parser("refresh", help="run providers, write the snapshot")
+    r.add_argument("--force", action="store_true", help="ignore caches (re-audit everything)")
+    r.add_argument("--quiet", "-q", action="store_true")
+    r.set_defaults(fn=cmd_refresh)
+
+    s = sub.add_parser("show", help="print the cached digest")
+    s.add_argument("--lane", choices=[item.WORK, item.PRIVATE])
+    s.add_argument("--brief", action="store_true", help="titles only")
+    s.add_argument("--ids", action="store_true", help="show item ids (for `recap act`)")
+    s.set_defaults(fn=cmd_show)
+
+    j = sub.add_parser("json", help="print the raw snapshot")
+    j.set_defaults(fn=cmd_json)
+
+    a = sub.add_parser("act", help="apply an action to one item")
+    a.add_argument("id")
+    a.add_argument("action", choices=["read", "archive", "trash", "star"])
+    a.set_defaults(fn=cmd_act)
+
+    u = sub.add_parser("undo", help="undo the last action")
+    u.set_defaults(fn=cmd_undo)
+
+    v = sub.add_parser("providers", help="show provider status")
+    v.set_defaults(fn=cmd_providers)
+
+    args = p.parse_args()
+    sys.exit(args.fn(args))
+
+
+if __name__ == "__main__":
+    main()
