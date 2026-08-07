@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 
 from .providers import security
@@ -55,6 +56,57 @@ def _dirty_manifest(path):
     except (OSError, subprocess.SubprocessError):
         return []
     return [ln[3:].strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+
+
+def fix_in_terminal(it, dry_run=False):
+    """Run the fix in a kitty window instead of headlessly.
+
+    The headless path can only report a one-line verdict, and the interesting
+    case — "nothing changed, these need a major bump" — is exactly the one
+    where you want npm's actual output, the advisory list, and a shell already
+    sitting in the right directory to do something about it.
+
+    Still never commits, and still shows you the resulting diff.
+    """
+    if it.get("source", "").split(":")[0] != "security":
+        return False, "fix only applies to security rows"
+    if (it.get("who") or "").startswith("+"):
+        return False, "that is the collapsed summary row — open a specific advisory"
+
+    path, name = _repo_of(it)
+    if path is None:
+        return False, name
+    lock, tool = security._lockfile(path)
+    if not lock:
+        return False, f"{name}: no npm/pnpm lockfile"
+
+    cmd = ("pnpm audit --fix" if tool == "pnpm"
+           else "npm audit fix --package-lock-only")
+    pkg = it.get("sub") or ""
+    dirty = _dirty_manifest(path)
+    warn = (f'echo "!! uncommitted {", ".join(dirty)} — the fix will mix with it"; echo;'
+            if dirty else "")
+
+    script = (
+        f'cd {shlex.quote(path)} || exit 1; '
+        f'echo "recap fix · {name}  ({pkg})"; '
+        f'echo advisory: {shlex.quote(it.get("title", "")[:120])}; echo; '
+        f'{warn}'
+        f'echo "$ {cmd}"; {cmd}; echo; '
+        f'echo "--- manifest changes (nothing committed) ---"; '
+        f'git status --short -- package.json package-lock.json pnpm-lock.yaml; echo; '
+        f'echo "--- advisories left ---"; '
+        f'{"pnpm audit" if tool == "pnpm" else "npm audit"} 2>&1 | tail -20; echo; '
+        f'echo "[enter] to close"; read _'
+    )
+    term = os.environ.get("TERMINAL") or "kitty"
+    argv = ([term, "--working-directory", path, "bash", "-lc", script]
+            if os.path.basename(term) == "kitty" else [term, "-e", "bash", "-lc", script])
+    if dry_run:
+        return True, f"[dry] {term}: {cmd} in {name}"
+    subprocess.Popen(argv, start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True, f"fixing {name} in a terminal"
 
 
 def fix_item(it, dry_run=False):

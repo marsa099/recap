@@ -21,7 +21,8 @@ recap show             # print the digest as text
 recap show --lane work # work only
 recap show --ids       # with item ids, for `recap act`
 recap act <id> read    # read | archive | trash | star
-recap fix <id>         # security: apply the dependency bump (--dry-run to preview)
+recap fix <id>         # security: apply the dependency bump headlessly
+recap fix <id> --term  # ...or in a terminal, so you can see the output (this is what `ff` does)
 recap term <id>        # security: open a terminal in that row's repo
 recap undo             # undo the last action
 recap providers        # what's wired up, and whether it's reachable
@@ -77,7 +78,11 @@ Design notes worth knowing:
   reported rather than silently taken; never commits; and it refuses outright if
   `package.json` or the lockfile already has uncommitted changes, so a fix can't
   get tangled with dependency work in flight. In the UI it is `ff`, doubled like
-  `dd` — it is the one action with no undo.
+  `dd` — it is the one action with no undo. `ff` uses `--term`: the fix runs in
+  a kitty window showing the command, the resulting manifest diff and the
+  advisories left over, because the common outcome is "nothing changed, these
+  need a major bump" and a toast cannot show you why or leave you a shell in
+  the right directory.
 - **State survives refresh.** Read/starred/dismissed live in `state.json`,
   keyed by a stable hash of `source:key`, so rebuilding every item doesn't wipe
   your triage. A dismissed advisory stays dismissed until its version moves,
