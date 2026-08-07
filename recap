@@ -5,6 +5,7 @@
     recap show [--lane L]     print the cached digest as text
     recap json                print the raw snapshot (what the QML reads)
     recap act <id> <action>   read | archive | trash | star  (+ undo)
+    recap fix <id>            apply a security row's dependency bump
     recap undo                undo the last action
     recap providers           what's wired up and whether it's reachable
 
@@ -21,6 +22,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 from recaplib import addons, item, snapshot  # noqa: E402
+from recaplib.fix import fix_item  # noqa: E402
 from recaplib.open import open_item  # noqa: E402
 from recaplib.providers import chat, mail, news, security  # noqa: E402
 
@@ -179,6 +181,22 @@ def cmd_open(args):
     return 0 if ok else 1
 
 
+def cmd_fix(args):
+    snap = snapshot.load_snapshot()
+    it = next((i for i in snap["items"] if i["id"] == args.id), None)
+    if not it:
+        print(f"no item {args.id} in the snapshot", file=sys.stderr)
+        return 1
+    ok, note = fix_item(it, dry_run=args.dry_run)
+    print(note, file=sys.stdout if ok else sys.stderr)
+    if ok and not args.dry_run:
+        # Re-derive the security section so the fixed row leaves the digest.
+        import subprocess as _sp
+        _sp.run([os.path.realpath(__file__), "refresh", "-q", "--only", "security"],
+                capture_output=True, timeout=300)
+    return 0 if ok else 1
+
+
 def cmd_undo(args):
     last = snapshot.undo_last()
     if not last:
@@ -231,6 +249,12 @@ def main():
     o.add_argument("--dry-run", action="store_true",
                    help="say what would happen without launching anything")
     o.set_defaults(fn=cmd_open)
+
+    x = sub.add_parser("fix", help="apply the dependency bump a security row needs")
+    x.add_argument("id")
+    x.add_argument("--dry-run", action="store_true",
+                   help="say what would run without touching the repo")
+    x.set_defaults(fn=cmd_fix)
 
     u = sub.add_parser("undo", help="undo the last action")
     u.set_defaults(fn=cmd_undo)

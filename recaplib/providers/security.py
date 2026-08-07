@@ -27,6 +27,20 @@ CACHE_FILE = os.path.join(CACHE, "vulns.json")
 RANK = {"critical": 0, "high": 1, "moderate": 2, "low": 3, "info": 4}
 
 
+def _last_commit(path):
+    """Unix ts of the repo's most recent commit, 0 if unknown.
+
+    Used as the secondary sort: among equally severe findings, the repo you
+    touched yesterday matters more than one you last built in 2023.
+    """
+    try:
+        r = subprocess.run(["git", "-C", path, "log", "-1", "--format=%ct"],
+                           capture_output=True, text=True, timeout=8)
+        return int((r.stdout or "0").strip() or 0)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
+
+
 def _lockfile(path):
     for name in ("pnpm-lock.yaml", "package-lock.json"):
         p = os.path.join(path, name)
@@ -106,9 +120,17 @@ def collect(force=False):
                 prev["stale"] = True
                 results[name] = prev
             continue
-        results[name] = {"lane": lane, "mtime": mtime, "at": now,
+        results[name] = {"lane": lane, "mtime": mtime, "at": now, "path": path,
                          "findings": found, "stale": False}
         audited += 1
+
+    # last_commit is a *current* fact, not an audit-time one — a repo you
+    # committed to an hour ago should rise even if its advisories are cached.
+    # One cheap git call per repo, so it runs on every sweep.
+    for path, name, _ in _repos():
+        if name in results:
+            results[name]["path"] = path
+            results[name]["last_commit"] = _last_commit(path)
 
     write_json(CACHE_FILE, results)
 
@@ -138,7 +160,8 @@ def collect(force=False):
         for pkg, e in by_pkg.items():
             rows.append((RANK.get(e["sev"], 4), name, pkg, e, r))
 
-    rows.sort(key=lambda t: (t[0], t[1], t[2]))
+    # 1. severity  2. last commit, newest first  3. stable tiebreak
+    rows.sort(key=lambda t: (t[0], -(t[4].get("last_commit") or 0), t[1], t[2]))
     shown, hidden = rows[:max_rows], rows[max_rows:]
 
     out = []
@@ -156,14 +179,14 @@ def collect(force=False):
             summary=("; ".join(t for t in e["titles"][:3]) if n > 1 else "")
                     + (" · stale, last good scan" if r.get("stale") else ""),
             when=e["sev"].capitalize(),
-            ts=0,
+            ts=r.get("last_commit") or 0,
             accent="red" if e["sev"] in ("critical", "high") else "yellow",
             sev=e["sev"],
             score=100 - RANK.get(e["sev"], 4) * 15,
             priority=e["sev"] == "critical",
             goto={"kind": "url", "url": e["url"] or
                   f"https://github.com/advisories?query={pkg}"},
-            actions=["read", "trash", "star"],
+            actions=["read", "trash", "star", "fix"],
         ))
 
     if hidden:
