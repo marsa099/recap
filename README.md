@@ -22,6 +22,7 @@ recap show --lane work # work only
 recap show --ids       # with item ids, for `recap act`
 recap act <id> read    # read | archive | trash | star
 recap fix <id>         # security: apply the dependency bump (--dry-run to preview)
+recap term <id>        # security: open a terminal in that row's repo
 recap undo             # undo the last action
 recap providers        # what's wired up, and whether it's reachable
 ```

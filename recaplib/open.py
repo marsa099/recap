@@ -119,6 +119,33 @@ def _spawn(cmd):
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def open_terminal(it, dry_run=False):
+    """Open a terminal in the repo a security row is about.
+
+    Resolution goes through the same path lookup `recap fix` uses, so the two
+    can never disagree about which checkout a row refers to.
+    """
+    from .fix import _repo_of
+
+    if it.get("source", "").split(":")[0] != "security":
+        return False, "a terminal only makes sense for a security row"
+    if (it.get("who") or "").startswith("+"):
+        return False, "that is the collapsed summary row — pick a specific advisory"
+
+    path, name = _repo_of(it)
+    if path is None:
+        return False, name
+
+    # niri exports TERMINAL; fall back to kitty, which is what it is set to.
+    term = os.environ.get("TERMINAL") or "kitty"
+    cmd = ([term, "--working-directory", path] if os.path.basename(term) == "kitty"
+           else [term, "-d", path])
+    if dry_run:
+        return True, f"[dry] {' '.join(cmd)}"
+    _spawn(cmd)
+    return True, f"terminal in {name}"
+
+
 def open_item(it, dry_run=False):
     """Returns (ok, message). The UI shows the message verbatim."""
     g = it.get("goto") or {}

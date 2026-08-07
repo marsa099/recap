@@ -6,6 +6,7 @@
     recap json                print the raw snapshot (what the QML reads)
     recap act <id> <action>   read | archive | trash | star  (+ undo)
     recap fix <id>            apply a security row's dependency bump
+    recap term <id>           open a terminal in that row's repo
     recap undo                undo the last action
     recap providers           what's wired up and whether it's reachable
 
@@ -23,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 from recaplib import addons, item, snapshot  # noqa: E402
 from recaplib.fix import fix_item  # noqa: E402
-from recaplib.open import open_item  # noqa: E402
+from recaplib.open import open_item, open_terminal  # noqa: E402
 from recaplib.providers import chat, mail, news, security  # noqa: E402
 
 PROVIDERS = [
@@ -197,6 +198,17 @@ def cmd_fix(args):
     return 0 if ok else 1
 
 
+def cmd_term(args):
+    snap = snapshot.load_snapshot()
+    it = next((i for i in snap["items"] if i["id"] == args.id), None)
+    if not it:
+        print(f"no item {args.id} in the snapshot", file=sys.stderr)
+        return 1
+    ok, note = open_terminal(it, dry_run=args.dry_run)
+    print(note, file=sys.stdout if ok else sys.stderr)
+    return 0 if ok else 1
+
+
 def cmd_undo(args):
     last = snapshot.undo_last()
     if not last:
@@ -255,6 +267,11 @@ def main():
     x.add_argument("--dry-run", action="store_true",
                    help="say what would run without touching the repo")
     x.set_defaults(fn=cmd_fix)
+
+    t = sub.add_parser("term", help="open a terminal in a security row's repo")
+    t.add_argument("id")
+    t.add_argument("--dry-run", action="store_true")
+    t.set_defaults(fn=cmd_term)
 
     u = sub.add_parser("undo", help="undo the last action")
     u.set_defaults(fn=cmd_undo)
