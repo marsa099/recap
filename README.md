@@ -21,6 +21,7 @@ recap show             # print the digest as text
 recap show --lane work # work only
 recap show --ids       # with item ids, for `recap act`
 recap act <id> read    # read | archive | trash | star
+recap fix <id>         # security: apply the dependency bump (--dry-run to preview)
 recap undo             # undo the last action
 recap providers        # what's wired up, and whether it's reachable
 ```
@@ -65,6 +66,17 @@ Design notes worth knowing:
   findings. Advisories collapse per package, rank by severity, and only the
   worst `security.max_rows` get a row — the tail becomes one honest "N further
   advisories" line. Nothing is ever silently truncated.
+- **Security ordering is severity, then last commit descending.** Among equally
+  severe findings the repo you touched yesterday outranks one you last built in
+  2023. `last_commit` is recomputed every sweep, not frozen at audit time, so a
+  repo rises the moment you commit to it even with cached advisories.
+- **`fix` is deliberately timid**, because it edits your repos. npm runs with
+  `--package-lock-only` (no `node_modules` churn, the change is a readable
+  lockfile diff); never `--force`, so advisories needing a major bump are
+  reported rather than silently taken; never commits; and it refuses outright if
+  `package.json` or the lockfile already has uncommitted changes, so a fix can't
+  get tangled with dependency work in flight. In the UI it is `ff`, doubled like
+  `dd` — it is the one action with no undo.
 - **State survives refresh.** Read/starred/dismissed live in `state.json`,
   keyed by a stable hash of `source:key`, so rebuilding every item doesn't wipe
   your triage. A dismissed advisory stays dismissed until its version moves,
