@@ -100,7 +100,7 @@ def collect():
             ts=date or 0,
             accent="blue" if lane == item.WORK else "green",
             score=60,
-            goto={"kind": "app", "cmd": ["mlqs-open", account, str(cid)]},
+            goto={"kind": "app", "cmd": ["mlqs-open", account, str(cid)]},  # resolved by `recap open`
             actions=["read", "archive", "trash", "star"],
         ))
 

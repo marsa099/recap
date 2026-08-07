@@ -54,13 +54,18 @@ def collect():
         try:
             chans = _channels(sock_name)
         except OSError as e:
-            out.append(item.stale_notice(
+            notice = item.stale_notice(
                 source, "Chat", lane,
                 f"{display} provider down",
                 f"{sock_name} unreachable ({e.__class__.__name__}). "
                 f"{display} is unrepresented in this digest — not silently reported as zero.",
                 when="down",
-            ))
+            )
+            # The useful action on a down provider is to start it, so make
+            # ⏎ launch the client rather than doing nothing.
+            notice["goto"] = {"kind": "app", "cmd": [f"{source}-open", ""]}
+            notice["actions"] = ["read"]
+            out.append(notice)
             continue
         up += 1
         for c in chans:
@@ -86,7 +91,7 @@ def collect():
                 accent="orange" if mention else accent,
                 score=90 if mention else 55 + min(unread, 30),
                 priority=mention,
-                goto={"kind": "app", "cmd": [f"{source}-open", name]},
+                goto={"kind": "app", "cmd": [f"{source}-open", name]},  # resolved by `recap open`
                 actions=["read"],
             ))
     return out, f"{up}/{len(CLIENTS)} daemons up"

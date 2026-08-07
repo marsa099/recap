@@ -21,6 +21,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 from recaplib import addons, item, snapshot  # noqa: E402
+from recaplib.open import open_item  # noqa: E402
 from recaplib.providers import chat, mail, news, security  # noqa: E402
 
 PROVIDERS = [
@@ -158,6 +159,17 @@ def cmd_act(args):
     return 0
 
 
+def cmd_open(args):
+    snap = snapshot.load_snapshot()
+    it = next((i for i in snap["items"] if i["id"] == args.id), None)
+    if not it:
+        print(f"no item {args.id} in the snapshot", file=sys.stderr)
+        return 1
+    ok, note = open_item(it, dry_run=args.dry_run)
+    print(note, file=sys.stdout if ok else sys.stderr)
+    return 0 if ok else 1
+
+
 def cmd_undo(args):
     last = snapshot.undo_last()
     if not last:
@@ -202,6 +214,12 @@ def main():
     a.add_argument("id")
     a.add_argument("action", choices=["read", "archive", "trash", "star"])
     a.set_defaults(fn=cmd_act)
+
+    o = sub.add_parser("open", help="go to the thing this row is about")
+    o.add_argument("id")
+    o.add_argument("--dry-run", action="store_true",
+                   help="say what would happen without launching anything")
+    o.set_defaults(fn=cmd_open)
 
     u = sub.add_parser("undo", help="undo the last action")
     u.set_defaults(fn=cmd_undo)
