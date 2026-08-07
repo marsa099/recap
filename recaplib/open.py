@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
+import time
 
 HOME = os.path.expanduser("~")
 NIRI_JUMP = f"{HOME}/.config/niri/scripts/niri-jump-or-exec"
@@ -38,6 +40,78 @@ def _sock_send(name, payloads, timeout=4):
             s.sendall(json.dumps(p).encode() + b"\n")
     finally:
         s.close()
+
+
+def _summon_and_count(timeout=4):
+    """Send summonui and return how many OTHER clients the daemon has.
+
+    mlqs acks summonui with {"type":"summonack","clients":N} precisely so a
+    caller can tell a live UI from a zombie. Zero means nothing is listening,
+    so a broadcast would be lost.
+    """
+    path = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "mlqs.sock")
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    s.connect(path)
+    try:
+        s.sendall(json.dumps({"type": "summonui"}).encode() + b"\n")
+        f = s.makefile("r")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            line = f.readline()
+            if not line:
+                break
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if msg.get("type") == "summonack":
+                return int(msg.get("clients") or 0)
+    finally:
+        s.close()
+    return 0
+
+
+def _wait_for_client(timeout=12, poll=0.4):
+    """Block until an mlqs UI has attached to the daemon."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(poll)
+        try:
+            if _summon_and_count(timeout=2) > 0:
+                # It is connected, but QML bindings settle a beat later; the
+                # openconv handler needs the conversation model in place.
+                time.sleep(0.6)
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _niri_window_matches(title_re):
+    """True when a window whose title matches `title_re` is already open.
+
+    The chat daemons have no equivalent of mlqs's summonack, so the window
+    list is how we tell "UI is up, navigate now" from "launch it first".
+    """
+    try:
+        out = subprocess.run(["niri", "msg", "--json", "windows"],
+                             capture_output=True, text=True, timeout=4).stdout
+        wins = json.loads(out or "[]")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    pat = re.compile(title_re)
+    return any(pat.search(w.get("title") or "") for w in wins)
+
+
+def _wait_for_window(title_re, timeout=15, poll=0.5):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(poll)
+        if _niri_window_matches(title_re):
+            time.sleep(0.8)   # let the QML model settle before navigating
+            return True
+    return False
 
 
 def _spawn(cmd):
@@ -68,26 +142,27 @@ def open_item(it, dry_run=False):
         cmd = g.get("cmd") or []
         account = cmd[1] if len(cmd) > 2 else ""
         conv = cmd[2] if len(cmd) > 2 else ""
-        # `openconv` is what the mlqs UI acts on for a notification deep-link,
-        # but the daemon only broadcasts it from its own notification callback
-        # — there is no client command for it yet. Sending it is a no-op on
-        # today's daemon and starts working the moment the fork gains one
-        # (see README). Raising the window is what actually happens now.
-        deep = False
-        try:
-            _sock_send("mlqs.sock", [
-                {"type": "openconv", "account": account, "id": conv},
-                {"type": "summonui"},
-            ])
-            deep = True
-        except OSError:
-            pass
         if dry_run:
-            return True, f"[dry] jump mlqs + openconv {account}/{conv[:12]}"
+            return True, f"[dry] openconv mlqs {account}/{conv[:12]} (+launch if no UI)"
+        # `openconv` is a broadcast — it only reaches a UI that is *already*
+        # connected. Sending it before launching would drop it on the floor,
+        # so ask the daemon how many other clients it has (summonui's ack
+        # carries the count), and if there are none, launch first and wait for
+        # the UI to attach before deep-linking.
+        payload = {"type": "openconv", "account": account, "id": conv}
+        try:
+            clients = _summon_and_count()
+        except OSError:
+            return False, "mlqs daemon is not running"
+        if clients > 0:
+            _sock_send("mlqs.sock", [payload])
+            _spawn([NIRI_JUMP, "title:^mlqs$", "mlqs-client"])
+            return True, f"opening mlqs → {account}"
         _spawn([NIRI_JUMP, "title:^mlqs$", "mlqs-client"])
-        return True, (f"opening mlqs ({account}) — lands in the inbox, not the thread"
-                      if deep else
-                      f"opening mlqs ({account}) — daemon was down, inbox only")
+        if _wait_for_client(timeout=12):
+            _sock_send("mlqs.sock", [payload])
+            return True, f"starting mlqs → {account}"
+        return True, f"started mlqs ({account}) — UI took too long, landed in the inbox"
 
     if source in CHAT_WINDOWS:
         matcher, launcher = CHAT_WINDOWS[source]
@@ -102,16 +177,29 @@ def open_item(it, dry_run=False):
         # clicked notification produces. Added to dsqrd/slqs/tmqs by us; a
         # daemon that predates it ignores the unknown verb, so this degrades to
         # "raise the window" rather than failing.
-        deep = False
-        if chan_id:
+        #
+        # Being a broadcast, it only reaches a UI that is already attached, so
+        # the order matters: navigate first if the window is up, otherwise
+        # launch and wait for it before navigating.
+        title_re = matcher.split(":", 1)[1] if ":" in matcher else matcher
+        already = _niri_window_matches(title_re)
+        if not chan_id:
+            _spawn([NIRI_JUMP, matcher, launcher])
+            return True, f"opening {source}"
+        if already:
             try:
                 _sock_send(f"{source}.sock", [{"type": "open", "channel": chan_id}])
-                deep = True
+            except OSError:
+                return False, f"{source} daemon unreachable"
+            _spawn([NIRI_JUMP, matcher, launcher])
+            return True, f"opening {source} → {chan}"
+        _spawn([NIRI_JUMP, matcher, launcher])
+        if _wait_for_window(title_re, timeout=15):
+            try:
+                _sock_send(f"{source}.sock", [{"type": "open", "channel": chan_id}])
+                return True, f"starting {source} → {chan}"
             except OSError:
                 pass
-        _spawn([NIRI_JUMP, matcher, launcher])
-        if deep:
-            return True, f"opening {source} → {chan}"
-        return True, f"opening {source}" + (f" — select {chan} yourself" if chan else "")
+        return True, f"started {source} — select {chan} yourself"
 
     return False, f"don't know how to open a {source} row"
