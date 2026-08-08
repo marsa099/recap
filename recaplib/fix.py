@@ -46,12 +46,18 @@ def _repo_of(it):
     return path, name
 
 
+# Files a fix can legitimately touch. pnpm 11 moved settings out of
+# package.json into pnpm-workspace.yaml (and writes minimumReleaseAgeExclude
+# there when it bumps), so leaving it out under-reported what changed.
+MANIFESTS = ["package.json", "package-lock.json", "pnpm-lock.yaml",
+             "pnpm-workspace.yaml"]
+
+
 def _dirty_manifest(path):
     """Names of manifest/lock files with uncommitted changes."""
     try:
         r = subprocess.run(
-            ["git", "-C", path, "status", "--porcelain", "--",
-             "package.json", "package-lock.json", "pnpm-lock.yaml"],
+            ["git", "-C", path, "status", "--porcelain", "--"] + MANIFESTS,
             capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return []
@@ -105,8 +111,7 @@ def fix_in_terminal(it, dry_run=False):
         f'{warn}'
         f'echo "$ {cmd}"; {cmd}; echo; '
         f'echo "--- manifest changes ---"; '
-        f'git status --short -- package.json package-lock.json pnpm-lock.yaml '
-        f'|| echo "(none)"; echo; '
+        f'git status --short -- {" ".join(MANIFESTS)} || echo "(none)"; echo; '
         f'echo "--- advisories left ---"; '
         f'{audit} 2>&1 | grep -E "vulnerabilit|Severity" | tail -3; echo; '
         f'echo "still vulnerable? next step:"; echo "  {escalate}"; echo; '
