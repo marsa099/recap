@@ -78,6 +78,68 @@ build_check() {
     fi
 }
 
+pkg_version() {
+    python3 - "$1" <<'PYVER' 2>/dev/null || true
+import json, sys
+try:
+    d = json.load(open("package.json"))
+except Exception:
+    sys.exit()
+allv = {**(d.get("dependencies") or {}), **(d.get("devDependencies") or {})}
+v = allv.get(sys.argv[1] or "")
+print(v.lstrip("^~") if v else "")
+PYVER
+}
+
+commit_message() {
+    local after=$1 cleared ver
+    cleared=$(( BEFORE - after ))
+    [ "$cleared" -lt 0 ] && cleared=0
+    ver=$(pkg_version "$PKG")
+    if [ -n "$PKG" ] && [ -n "$ver" ] && [ "$cleared" -gt 0 ]; then
+        echo "Bumps $PKG to $ver to clear $cleared advisories"
+    elif [ "$cleared" -gt 0 ]; then
+        echo "Fixes $cleared dependency advisories"
+    else
+        echo "Updates dependencies for security advisories"
+    fi
+}
+
+commit_and_push() {
+    local c; c=$(changes)
+    [ -z "$c" ] && { warn "nothing to commit"; return; }
+    local msg; msg=$(commit_message "$(remaining)")
+    echo
+    bold "commit these manifest files only:"
+    echo "$c"
+    dim "  message: $msg"
+    echo
+    read -rp "commit? [Y]es / [e]dit message / [n]o: " a
+    case "$a" in
+        n|N) return ;;
+        e|E) read -rp "message: " m; [ -n "$m" ] && msg="$m" ;;
+    esac
+    # Stage only the manifests that actually changed: passing a pathspec that
+    # matches nothing (package-lock.json in a pnpm repo) makes git reject the
+    # whole `add` and stage nothing at all.
+    local -a files=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && files+=("${line:3}")
+    done < <(changes)
+    [ ${#files[@]} -eq 0 ] && { warn "nothing to stage"; return; }
+    run git add -- "${files[@]}"
+    if ! run git commit -m "$msg"; then
+        warn "commit failed"; return
+    fi
+    local up; up=$(git rev-parse --abbrev-ref '@{u}' 2>/dev/null)
+    if [ -z "$up" ]; then
+        warn "no upstream branch — committed but not pushed"; return
+    fi
+    read -rp "push to $up? [Y/n]: " p
+    case "$p" in n|N) dim "not pushed"; return ;; esac
+    run git push
+}
+
 bold "recap fix · $(basename "$REPO")  ($PKG)"
 [ -n "$TITLE" ] && dim "advisory: $TITLE"
 if [ "$TOOL" = pnpm ]; then
@@ -86,6 +148,8 @@ else
     dim "scope:    npm touches the lockfile only, no install"
 fi
 dim "nothing is committed at any point"
+
+BEFORE=$(remaining)
 
 dirty=$(changes)
 [ -n "$dirty" ] && { echo; warn "!! these already had uncommitted changes:"; echo "$dirty"; }
@@ -113,11 +177,12 @@ while true; do
   M  major bump everything    every dependency to its latest major
   b  build check              run the build script and report
   s  status                   re-show changes and remaining advisories
+  c  commit + push            manifest files only, generated message
   r  revert                   git checkout the manifest files
   q  quit                     leave changes in the working tree
 
 MENU
-    read -rp "choice [o/m/M/b/s/r/q]: " choice
+    read -rp "choice [o/m/M/b/c/s/r/q]: " choice
     case "$choice" in
         o)  if [ "$TOOL" = pnpm ]; then
                 run pnpm audit --fix=override
@@ -144,6 +209,7 @@ MENU
             show_state
             warn "everything moved across majors — press b to build-check" ;;
         b)  build_check ;;
+        c)  commit_and_push ;;
         s)  show_state ;;
         r)  run git checkout -- "${MANIFESTS[@]}"
             bold "reverted"; show_state ;;
@@ -155,11 +221,20 @@ done
 echo
 c=$(changes)
 if [ -n "$c" ]; then
-    bold "left in your working tree, uncommitted:"
+    bold "uncommitted manifest changes:"
     echo "$c"
-    dim "commit it yourself, or: git checkout -- ${MANIFESTS[*]}"
+    commit_and_push
 else
     dim "no manifest changes"
 fi
+
+# Re-derive the security section so a cleared row leaves the digest. Only this
+# repo gets re-audited — the others stay cached, keyed on lockfile mtime.
+RECAP="$(dirname "$(dirname "$(realpath "$0")")")/recap"
+if [ -x "$RECAP" ]; then
+    dim "refreshing recap…"
+    "$RECAP" refresh --quiet --only security < /dev/null >/dev/null 2>&1 &
+fi
+
 echo
 read -rp "[enter] to close "
