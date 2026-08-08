@@ -74,7 +74,10 @@ Design notes worth knowing:
   repo rises the moment you commit to it even with cached advisories.
 - **`fix` is deliberately timid**, because it edits your repos. npm runs with
   `--package-lock-only` (no `node_modules` churn, the change is a readable
-  lockfile diff); never `--force`, so advisories needing a major bump are
+  lockfile diff); pnpm runs `--fix=update` — bare `--fix` is a hard error on
+  pnpm 11 (`ERR_PNPM_INVALID_FIX_OPTION`), and `update` is the analogue of npm's
+  audit fix, though note it does edit `package.json` and install, which npm's
+  path does not. Never `--force`, so advisories needing a major bump are
   reported rather than silently taken; never commits; and it refuses outright if
   `package.json` or the lockfile already has uncommitted changes, so a fix can't
   get tangled with dependency work in flight. In the UI it is `ff`, doubled like

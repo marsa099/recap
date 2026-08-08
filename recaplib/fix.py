@@ -80,23 +80,36 @@ def fix_in_terminal(it, dry_run=False):
     if not lock:
         return False, f"{name}: no npm/pnpm lockfile"
 
-    cmd = ("pnpm audit --fix" if tool == "pnpm"
+    # pnpm 11 requires a method: bare `--fix` errors with
+    # ERR_PNPM_INVALID_FIX_OPTION. "update" is the analogue of npm's audit fix
+    # (bump to a non-vulnerable version); "override" pins transitive deps via a
+    # package.json overrides block and is the heavier escalation.
+    cmd = ("pnpm audit --fix=update" if tool == "pnpm"
            else "npm audit fix --package-lock-only")
     pkg = it.get("sub") or ""
     dirty = _dirty_manifest(path)
     warn = (f'echo "!! uncommitted {", ".join(dirty)} — the fix will mix with it"; echo;'
             if dirty else "")
 
+    scope = ("updates package.json + lockfile and installs"
+             if tool == "pnpm" else "lockfile only, no install")
+    escalate = ("pnpm audit --fix=override   # pins transitive deps"
+                if tool == "pnpm" else
+                "npm audit fix --force        # takes major bumps, can break the build")
+    audit = "pnpm audit" if tool == "pnpm" else "npm audit"
     script = (
         f'cd {shlex.quote(path)} || exit 1; '
         f'echo "recap fix · {name}  ({pkg})"; '
-        f'echo advisory: {shlex.quote(it.get("title", "")[:120])}; echo; '
+        f'echo advisory: {shlex.quote(it.get("title", "")[:120])}; '
+        f'echo "scope:    {scope} · nothing is committed"; echo; '
         f'{warn}'
         f'echo "$ {cmd}"; {cmd}; echo; '
-        f'echo "--- manifest changes (nothing committed) ---"; '
-        f'git status --short -- package.json package-lock.json pnpm-lock.yaml; echo; '
+        f'echo "--- manifest changes ---"; '
+        f'git status --short -- package.json package-lock.json pnpm-lock.yaml '
+        f'|| echo "(none)"; echo; '
         f'echo "--- advisories left ---"; '
-        f'{"pnpm audit" if tool == "pnpm" else "npm audit"} 2>&1 | tail -20; echo; '
+        f'{audit} 2>&1 | grep -E "vulnerabilit|Severity" | tail -3; echo; '
+        f'echo "still vulnerable? next step:"; echo "  {escalate}"; echo; '
         f'echo "[enter] to close"; read _'
     )
     term = os.environ.get("TERMINAL") or "kitty"
@@ -128,7 +141,7 @@ def fix_item(it, dry_run=False):
     if dirty:
         return False, f"{name}: uncommitted {', '.join(dirty)} — commit or stash first"
 
-    cmd = (["pnpm", "audit", "--fix"] if tool == "pnpm"
+    cmd = (["pnpm", "audit", "--fix=update"] if tool == "pnpm"
            else ["npm", "audit", "fix", "--package-lock-only"])
     if dry_run:
         return True, f"[dry] {name}: {' '.join(cmd)}"
