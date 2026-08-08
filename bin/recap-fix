@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# recap-fix — run a security row's dependency fix, interactively.
+#
+#   recap-fix <repo-path> <npm|pnpm> <package> [advisory title]
+#
+# Invoked by `recap fix --term` inside a kitty window. It exists as a real
+# script rather than a generated one-liner so it can *ask* before escalating:
+# the safe pass rarely clears transitive advisories, and the next step (pinning
+# via overrides, or taking a major bump) is a judgement call that should be
+# yours, made with the audit output in front of you.
+#
+# Never commits. Never escalates without you choosing it.
+set -uo pipefail
+
+REPO=${1:?repo path required}
+TOOL=${2:?npm or pnpm required}
+PKG=${3:-}
+TITLE=${4:-}
+
+cd "$REPO" || { echo "recap-fix: cannot cd to $REPO"; exit 1; }
+
+MANIFESTS=(package.json package-lock.json pnpm-lock.yaml pnpm-workspace.yaml)
+
+bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+dim()  { printf '\033[2m%s\033[0m\n' "$*"; }
+warn() { printf '\033[33m%s\033[0m\n' "$*"; }
+
+audit_summary() {
+    if [ "$TOOL" = pnpm ]; then pnpm audit < /dev/null 2>&1; else npm audit < /dev/null 2>&1; fi \
+        | grep -E "vulnerabilit|Severity" | tail -3
+}
+
+remaining() {
+    if [ "$TOOL" = pnpm ]; then
+        pnpm audit --json < /dev/null 2>/dev/null | grep -o '"severity"' | wc -l
+    else
+        npm audit --json < /dev/null 2>/dev/null \
+            | python3 -c 'import json,sys;d=json.load(sys.stdin);print(len(d.get("vulnerabilities") or {}))' 2>/dev/null || echo 0
+    fi
+}
+
+changes() {
+    git status --short -- "${MANIFESTS[@]}" 2>/dev/null
+}
+
+show_state() {
+    echo
+    bold "--- manifest changes (nothing committed) ---"
+    local c; c=$(changes)
+    [ -n "$c" ] && echo "$c" || dim "(none)"
+    echo
+    bold "--- advisories left ---"
+    audit_summary
+    echo
+}
+
+run() {
+    echo
+    bold "\$ $*"
+    # stdin from /dev/null: npm/pnpm/git will happily consume the menu's
+    # keystrokes otherwise, and the next `read` then sees whatever is left —
+    # which silently skips the choice you actually typed.
+    "$@" < /dev/null
+    local rc=$?
+    echo
+    return $rc
+}
+
+build_check() {
+    if ! grep -q '"build"' package.json 2>/dev/null; then
+        warn "no build script in package.json — skipping"
+        return
+    fi
+    if run "$TOOL" run build; then
+        bold "build OK"
+    else
+        warn "BUILD FAILED — consider: git checkout -- ${MANIFESTS[*]}"
+    fi
+}
+
+bold "recap fix · $(basename "$REPO")  ($PKG)"
+[ -n "$TITLE" ] && dim "advisory: $TITLE"
+if [ "$TOOL" = pnpm ]; then
+    dim "scope:    pnpm updates package.json + lockfile and installs"
+else
+    dim "scope:    npm touches the lockfile only, no install"
+fi
+dim "nothing is committed at any point"
+
+dirty=$(changes)
+[ -n "$dirty" ] && { echo; warn "!! these already had uncommitted changes:"; echo "$dirty"; }
+
+# --- pass 1: the safe fix -------------------------------------------------
+if [ "$TOOL" = pnpm ]; then
+    run pnpm audit --fix=update
+else
+    run npm audit fix --package-lock-only
+fi
+show_state
+
+# --- escalation menu ------------------------------------------------------
+while true; do
+    left=$(remaining)
+    if [ "${left:-0}" -eq 0 ] 2>/dev/null; then
+        bold "clean — no advisories left"
+        break
+    fi
+    bold "$left advisories remain (transitive, or needing a major bump)"
+    cat <<'MENU'
+
+  o  pin transitive deps      pnpm: audit --fix=override   npm: audit fix --force
+  m  major bump this package  update it to latest, across majors
+  M  major bump everything    every dependency to its latest major
+  b  build check              run the build script and report
+  s  status                   re-show changes and remaining advisories
+  r  revert                   git checkout the manifest files
+  q  quit                     leave changes in the working tree
+
+MENU
+    read -rp "choice [o/m/M/b/s/r/q]: " choice
+    case "$choice" in
+        o)  if [ "$TOOL" = pnpm ]; then
+                run pnpm audit --fix=override
+                # `--fix=override` only *writes* the overrides — pnpm itself
+                # says "Run pnpm install to apply the fixes". Without this the
+                # lockfile never moves and the advisory count looks unchanged,
+                # which reads as "override did nothing".
+                run pnpm install
+            else
+                run npm audit fix --force
+            fi
+            show_state
+            warn "overrides can pin across majors (e.g. next 14 -> 15) — press b to build-check" ;;
+        m)  [ -z "$PKG" ] && { warn "no package on this row"; continue; }
+            if [ "$TOOL" = pnpm ]; then run pnpm update --latest "$PKG"
+            else run npm install "$PKG@latest"; fi
+            show_state
+            warn "a major bump landed — press b to build-check" ;;
+        M)  warn "this takes every dependency across major versions — expect breakage"
+            read -rp "sure? [y/N]: " ok
+            [ "$ok" = y ] || continue
+            if [ "$TOOL" = pnpm ]; then run pnpm update --latest
+            else run npx --yes npm-check-updates -u && run npm install; fi
+            show_state
+            warn "everything moved across majors — press b to build-check" ;;
+        b)  build_check ;;
+        s)  show_state ;;
+        r)  run git checkout -- "${MANIFESTS[@]}"
+            bold "reverted"; show_state ;;
+        q|"") break ;;
+        *)  warn "unknown choice: $choice" ;;
+    esac
+done
+
+echo
+c=$(changes)
+if [ -n "$c" ]; then
+    bold "left in your working tree, uncommitted:"
+    echo "$c"
+    dim "commit it yourself, or: git checkout -- ${MANIFESTS[*]}"
+else
+    dim "no manifest changes"
+fi
+echo
+read -rp "[enter] to close "

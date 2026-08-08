@@ -97,31 +97,20 @@ def fix_in_terminal(it, dry_run=False):
     warn = (f'echo "!! uncommitted {", ".join(dirty)} — the fix will mix with it"; echo;'
             if dirty else "")
 
-    scope = ("updates package.json + lockfile and installs"
-             if tool == "pnpm" else "lockfile only, no install")
-    escalate = ("pnpm audit --fix=override   # pins transitive deps"
-                if tool == "pnpm" else
-                "npm audit fix --force        # takes major bumps, can break the build")
-    audit = "pnpm audit" if tool == "pnpm" else "npm audit"
-    script = (
-        f'cd {shlex.quote(path)} || exit 1; '
-        f'echo "recap fix · {name}  ({pkg})"; '
-        f'echo advisory: {shlex.quote(it.get("title", "")[:120])}; '
-        f'echo "scope:    {scope} · nothing is committed"; echo; '
-        f'{warn}'
-        f'echo "$ {cmd}"; {cmd}; echo; '
-        f'echo "--- manifest changes ---"; '
-        f'git status --short -- {" ".join(MANIFESTS)} || echo "(none)"; echo; '
-        f'echo "--- advisories left ---"; '
-        f'{audit} 2>&1 | grep -E "vulnerabilit|Severity" | tail -3; echo; '
-        f'echo "still vulnerable? next step:"; echo "  {escalate}"; echo; '
-        f'echo "[enter] to close"; read _'
-    )
+    # A real script, not a generated one-liner — it needs to prompt before
+    # escalating to overrides or a major bump, and that is not something you
+    # can do from a string passed to `bash -lc`.
+    helper = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                          "bin", "recap-fix")
+    if not os.access(helper, os.X_OK):
+        return False, f"{helper} missing or not executable"
+    inner = [helper, path, tool, pkg, it.get("title", "")[:120]]
+
     term = os.environ.get("TERMINAL") or "kitty"
-    argv = ([term, "--working-directory", path, "bash", "-lc", script]
-            if os.path.basename(term) == "kitty" else [term, "-e", "bash", "-lc", script])
+    argv = ([term, "--working-directory", path] + inner
+            if os.path.basename(term) == "kitty" else [term, "-e"] + inner)
     if dry_run:
-        return True, f"[dry] {term}: {cmd} in {name}"
+        return True, f"[dry] {term}: {' '.join(inner[:3])}"
     subprocess.Popen(argv, start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return True, f"fixing {name} in a terminal"
