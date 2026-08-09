@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
+import shutil
 import subprocess
 
+from .config import get
 from .providers import security
 from .snapshot import CACHE, read_json, write_json
 
@@ -64,15 +65,40 @@ def _dirty_manifest(path):
     return [ln[3:].strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
 
 
+def _render_prompt(path, name, tool, pkg, title, count):
+    """Fill in prompts/fix-vulnerabilities.md for this repo."""
+    here = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    tpl_path = os.path.join(here, "prompts", "fix-vulnerabilities.md")
+    with open(tpl_path) as f:
+        tpl = f.read()
+    if tool == "pnpm":
+        audit_cmd, fix_cmd = "pnpm audit", "pnpm audit --fix=update"
+        note = ("Note: on pnpm this edits `package.json` and installs — it is not "
+                "lockfile-only the way npm's is.")
+    else:
+        audit_cmd, fix_cmd = "npm audit", "npm audit fix --package-lock-only"
+        note = ("`--package-lock-only` keeps `node_modules` untouched, so the change "
+                "is a readable lockfile diff.")
+    for k, v in {
+        "{{REPO}}": path, "{{REPO_NAME}}": name, "{{TOOL}}": tool,
+        "{{PACKAGE}}": pkg or "(unspecified)", "{{ADVISORY}}": title or "(none recorded)",
+        "{{COUNT}}": str(count), "{{AUDIT_CMD}}": audit_cmd,
+        "{{FIX_CMD}}": fix_cmd, "{{TOOL_NOTE}}": note,
+    }.items():
+        tpl = tpl.replace(k, v)
+    return tpl
+
+
 def fix_in_terminal(it, dry_run=False):
-    """Run the fix in a kitty window instead of headlessly.
+    """Hand the job to a coding agent in a kitty window.
 
-    The headless path can only report a one-line verdict, and the interesting
-    case — "nothing changed, these need a major bump" — is exactly the one
-    where you want npm's actual output, the advisory list, and a shell already
-    sitting in the right directory to do something about it.
-
-    Still never commits, and still shows you the resulting diff.
+    A shell script can only offer a fixed menu, and the interesting cases are
+    exactly the ones a menu handles badly: an advisory that needs a framework
+    major, a bump that breaks the build, a repo where the right answer is "drop
+    this dependency". So recap renders `prompts/fix-vulnerabilities.md` with
+    this row's context and starts an agent on it. The prompt is what encodes
+    the policy — ask before anything breaking, verify afterwards, never commit
+    unasked — so it is editable without touching any code.
     """
     if it.get("source", "").split(":")[0] != "security":
         return False, "fix only applies to security rows"
@@ -86,34 +112,24 @@ def fix_in_terminal(it, dry_run=False):
     if not lock:
         return False, f"{name}: no npm/pnpm lockfile"
 
-    # pnpm 11 requires a method: bare `--fix` errors with
-    # ERR_PNPM_INVALID_FIX_OPTION. "update" is the analogue of npm's audit fix
-    # (bump to a non-vulnerable version); "override" pins transitive deps via a
-    # package.json overrides block and is the heavier escalation.
-    cmd = ("pnpm audit --fix=update" if tool == "pnpm"
-           else "npm audit fix --package-lock-only")
-    pkg = it.get("sub") or ""
-    dirty = _dirty_manifest(path)
-    warn = (f'echo "!! uncommitted {", ".join(dirty)} — the fix will mix with it"; echo;'
-            if dirty else "")
+    agent = get("security.fix_agent", "claude")
+    if not shutil.which(agent):
+        return False, f"{agent} not on PATH — set security.fix_agent in config.toml"
 
-    # A real script, not a generated one-liner — it needs to prompt before
-    # escalating to overrides or a major bump, and that is not something you
-    # can do from a string passed to `bash -lc`.
-    helper = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-                          "bin", "recap-fix")
-    if not os.access(helper, os.X_OK):
-        return False, f"{helper} missing or not executable"
-    inner = [helper, path, tool, pkg, it.get("title", "")[:120]]
+    cached = (read_json(security.CACHE_FILE, {}).get(name) or {})
+    count = len(cached.get("findings") or [])
+    prompt = _render_prompt(path, name, tool, it.get("sub") or "",
+                            it.get("title", "")[:200],
+                            f"{count} ({it.get('sev') or 'unknown'} on this row)")
+    if dry_run:
+        return True, f"[dry] {agent} in {name} ({len(prompt)} char prompt)"
 
     term = os.environ.get("TERMINAL") or "kitty"
-    argv = ([term, "--working-directory", path] + inner
-            if os.path.basename(term) == "kitty" else [term, "-e"] + inner)
-    if dry_run:
-        return True, f"[dry] {term}: {' '.join(inner[:3])}"
+    argv = ([term, "--working-directory", path, agent, prompt]
+            if os.path.basename(term) == "kitty" else [term, "-e", agent, prompt])
     subprocess.Popen(argv, start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return True, f"fixing {name} in a terminal"
+    return True, f"{agent} is on {name}"
 
 
 def fix_item(it, dry_run=False):

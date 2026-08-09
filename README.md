@@ -22,7 +22,7 @@ recap show --lane work # work only
 recap show --ids       # with item ids, for `recap act`
 recap act <id> read    # read | archive | trash | star
 recap fix <id>         # security: apply the dependency bump headlessly
-recap fix <id> --term  # ...or in a terminal, so you can see the output (this is what `ff` does)
+recap fix <id> --term  # ...or hand it to a coding agent in a terminal (this is what `ff` does)
 recap term <id>        # security: open a terminal in that row's repo
 recap undo             # undo the last action
 recap providers        # what's wired up, and whether it's reachable
@@ -72,29 +72,24 @@ Design notes worth knowing:
   severe findings the repo you touched yesterday outranks one you last built in
   2023. `last_commit` is recomputed every sweep, not frozen at audit time, so a
   repo rises the moment you commit to it even with cached advisories.
-- **`fix` is interactive** (`bin/recap-fix`, opened in a kitty window by `ff`).
-  It runs the safe pass first, then — only if advisories remain — offers an
-  escalation menu: pin transitive deps via overrides, bump this package across
-  majors, bump everything, take the exact bumps npm says are required,
-  build-check, commit + push, or revert. Nothing beyond
-  the safe pass happens unless you pick it, and it never commits without asking.
-  The commit message is generated from what actually changed ("Bumps next to
-  15.5.21 to clear 25 advisories") and only the manifest files are staged.
-  Afterwards it re-audits that one repo so a cleared row leaves the digest.
+- **`fix` hands the job to a coding agent**, not a fixed menu. `ff` renders
+  `prompts/fix-vulnerabilities.md` with the row's context (repo, package
+  manager, advisory, current count) and starts `claude` — or whatever
+  `security.fix_agent` names — in a kitty window in that repo.
 
-  Two things that are easy to get wrong here, both learned the hard way:
-  `pnpm audit --fix=override` only *writes* the overrides — without a following
-  `pnpm install` the lockfile never moves and the advisory count looks
-  unchanged, as though override did nothing. And every sub-command runs with
-  stdin from `/dev/null`, because npm/pnpm will otherwise eat the menu's
-  keystrokes and the next `read` silently skips your choice. Staging also lists
-  only the manifests that changed — a pathspec matching nothing
-  (`package-lock.json` in a pnpm repo) makes git reject the whole `add` and
-  stage nothing. And when advisories survive every generic escalation, the menu
-  names the specific versions that would clear them (npm's per-advisory
-  `fixAvailable: {name, version}`) — otherwise you land back on an identical
-  menu with an identical count, which reads as a stuck loop when it is really
-  "this needs expo 53".
+  The prompt is where the policy lives, so it is editable without touching
+  code: stay in this repo, manifests only, **ask before any major bump or
+  framework/toolchain update**, **verify afterwards** by running whatever
+  typecheck/lint/build/test scripts the project actually has, revert if
+  verification fails, and never commit or push without asking.
+
+  A menu could not do this well. The interesting cases are exactly the ones a
+  fixed set of options handles badly — an advisory that needs a framework
+  major, a bump that breaks the build, a repo where the right answer is to drop
+  the dependency. Two hard-won details are baked into the prompt: pnpm's
+  `--fix=override` only *writes* the overrides and needs a following
+  `pnpm install`, and npm records the exact `fixAvailable: {name, version}` per
+  advisory, which is how you tell "needs expo 53" from "unfixable".
 
 - **The safe pass is deliberately timid**, because it edits your repos. npm runs with
   `--package-lock-only` (no `node_modules` churn, the change is a readable
