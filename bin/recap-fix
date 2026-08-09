@@ -62,6 +62,29 @@ print(sum(c for k, c in counts.items() if k != "info" and isinstance(c, int)))' 
     printf '%s' "$n"
 }
 
+fix_targets() {
+    # npm records, per advisory, the exact package+version that resolves it
+    # (fixAvailable: {name, version} when a major bump is required). Surfacing
+    # that turns "22 remain, menu again" -- which reads as a stuck loop -- into
+    # a concrete decision: take expo@53.0.27, or stop.
+    [ "$TOOL" = npm ] || return 0
+    npm audit --json < /dev/null 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit
+seen = {}
+for x in (d.get("vulnerabilities") or {}).values():
+    fa = x.get("fixAvailable")
+    if isinstance(fa, dict) and fa.get("name") and fa.get("version"):
+        key = fa["name"] + "@" + fa["version"]
+        seen[key] = seen.get(key, 0) + 1
+for k in sorted(seen, key=lambda k: -seen[k]):
+    print(k)
+' 2>/dev/null
+}
+
 changes() {
     git status --short -- "${MANIFESTS[@]}" 2>/dev/null
 }
@@ -194,11 +217,17 @@ while true; do
         break
     fi
     bold "$left advisories remain (transitive, or needing a major bump)"
+    TARGETS=$(fix_targets)
+    if [ -n "$TARGETS" ]; then
+        warn "resolved by a major bump of: $(echo $TARGETS | tr '\n' ' ')"
+        dim "  press F to install exactly those versions"
+    fi
     cat <<'MENU'
 
   o  pin transitive deps      pnpm: audit --fix=override   npm: audit fix --force
   m  major bump this package  update it to latest, across majors
   M  major bump everything    every dependency to its latest major
+  F  take required bumps      install the exact versions npm says will fix it
   b  build check              run the build script and report
   s  status                   re-show changes and remaining advisories
   c  commit + push            manifest files only, generated message
@@ -206,7 +235,7 @@ while true; do
   q  quit                     leave changes in the working tree
 
 MENU
-    read -rp "choice [o/m/M/b/c/s/r/q]: " choice
+    read -rp "choice [o/m/M/F/b/c/s/r/q]: " choice
     case "$choice" in
         o)  if [ "$TOOL" = pnpm ]; then
                 run pnpm audit --fix=override
@@ -232,6 +261,13 @@ MENU
             else run npx --yes npm-check-updates -u && run npm install; fi
             show_state
             warn "everything moved across majors — press b to build-check" ;;
+        F)  if [ -z "${TARGETS:-}" ]; then warn "nothing specific to install"; continue; fi
+            warn "installing: $(echo $TARGETS | tr '\n' ' ')  -- these are major bumps"
+            read -rp "sure? [y/N]: " ok
+            [ "$ok" = y ] || continue
+            for t in $TARGETS; do run npm install "$t"; done
+            show_state
+            warn "major versions landed - press b to build-check" ;;
         b)  build_check ;;
         c)  commit_and_push ;;
         s)  show_state ;;

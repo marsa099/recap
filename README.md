@@ -75,7 +75,8 @@ Design notes worth knowing:
 - **`fix` is interactive** (`bin/recap-fix`, opened in a kitty window by `ff`).
   It runs the safe pass first, then — only if advisories remain — offers an
   escalation menu: pin transitive deps via overrides, bump this package across
-  majors, bump everything, build-check, commit + push, or revert. Nothing beyond
+  majors, bump everything, take the exact bumps npm says are required,
+  build-check, commit + push, or revert. Nothing beyond
   the safe pass happens unless you pick it, and it never commits without asking.
   The commit message is generated from what actually changed ("Bumps next to
   15.5.21 to clear 25 advisories") and only the manifest files are staged.
@@ -89,7 +90,11 @@ Design notes worth knowing:
   keystrokes and the next `read` silently skips your choice. Staging also lists
   only the manifests that changed — a pathspec matching nothing
   (`package-lock.json` in a pnpm repo) makes git reject the whole `add` and
-  stage nothing.
+  stage nothing. And when advisories survive every generic escalation, the menu
+  names the specific versions that would clear them (npm's per-advisory
+  `fixAvailable: {name, version}`) — otherwise you land back on an identical
+  menu with an identical count, which reads as a stuck loop when it is really
+  "this needs expo 53".
 
 - **The safe pass is deliberately timid**, because it edits your repos. npm runs with
   `--package-lock-only` (no `node_modules` churn, the change is a readable
