@@ -27,16 +27,39 @@ warn() { printf '\033[33m%s\033[0m\n' "$*"; }
 
 audit_summary() {
     if [ "$TOOL" = pnpm ]; then pnpm audit < /dev/null 2>&1; else npm audit < /dev/null 2>&1; fi \
-        | grep -E "vulnerabilit|Severity" | tail -3
+        | grep -E "^[0-9]+ vulnerabilit|^found [0-9]+|Severity:" | tail -2
 }
 
 remaining() {
+    # Must print exactly one integer. Two traps here:
+    #  * `npm audit`/`pnpm audit` exit non-zero whenever vulnerabilities exist,
+    #    so under `pipefail` a trailing `|| echo 0` fires *in addition to* the
+    #    real count — the caller then sees "22\n0", the numeric test errors,
+    #    and the menu loops forever.
+    #  * the two tools disagree on shape: npm keys by package under
+    #    `vulnerabilities`, pnpm reports counts under `metadata.vulnerabilities`
+    #    and its findings under `advisories`. Parse both rather than grepping.
+    local out n
     if [ "$TOOL" = pnpm ]; then
-        pnpm audit --json < /dev/null 2>/dev/null | grep -o '"severity"' | wc -l
+        out=$(pnpm audit --json < /dev/null 2>/dev/null) || true
     else
-        npm audit --json < /dev/null 2>/dev/null \
-            | python3 -c 'import json,sys;d=json.load(sys.stdin);print(len(d.get("vulnerabilities") or {}))' 2>/dev/null || echo 0
+        out=$(npm audit --json < /dev/null 2>/dev/null) || true
     fi
+    n=$(printf '%s' "$out" | python3 -c 'import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(0); raise SystemExit
+v = d.get("vulnerabilities")
+if isinstance(v, dict) and v and not isinstance(next(iter(v.values())), int):
+    print(len(v)); raise SystemExit          # npm: keyed by package
+adv = d.get("advisories")
+if isinstance(adv, dict) and adv:
+    print(len(adv)); raise SystemExit        # pnpm: keyed by advisory id
+counts = ((d.get("metadata") or {}).get("vulnerabilities") or {})
+print(sum(c for k, c in counts.items() if k != "info" and isinstance(c, int)))' 2>/dev/null) || n=0
+    case "$n" in (''|*[!0-9]*) n=0 ;; esac
+    printf '%s' "$n"
 }
 
 changes() {
@@ -165,7 +188,8 @@ show_state
 # --- escalation menu ------------------------------------------------------
 while true; do
     left=$(remaining)
-    if [ "${left:-0}" -eq 0 ] 2>/dev/null; then
+    case "$left" in (''|*[!0-9]*) left=0 ;; esac
+    if [ "$left" -eq 0 ]; then
         bold "clean — no advisories left"
         break
     fi
