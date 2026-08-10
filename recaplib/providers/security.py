@@ -177,6 +177,12 @@ def collect(force=False):
     # honest "N more" row. Never silently truncate.
     max_rows = int(get("security.max_rows", 10))
     ignore = set(get("security.ignore_repos", []))
+    # Everything at or above this severity gets its own row; the rest is
+    # counted into one line. "moderate" reproduces the long-standing default.
+    min_sev = str(get("security.min_severity", "moderate")).lower()
+    if min_sev not in RANK:          # an unreadable value must not mislabel itself
+        min_sev = "moderate"
+    floor = RANK[min_sev]
 
     rows, low_count, ignored = [], 0, 0
     for name, r in results.items():
@@ -185,7 +191,7 @@ def collect(force=False):
             continue
         by_pkg = {}
         for sev, pkg, title, url, ids in (_fields(f) for f in r["findings"]):
-            if RANK.get(sev, 4) >= 3:
+            if RANK.get(sev, 4) > floor:
                 low_count += 1
                 continue
             e = by_pkg.setdefault(pkg, {"sev": sev, "titles": [], "url": url,
@@ -256,7 +262,7 @@ def collect(force=False):
 
     meta = f"{len(results)} repos, {audited} rescanned"
     if low_count:
-        meta += f" · {low_count} low suppressed"
+        meta += f" · {low_count} below {min_sev} suppressed"
     if ignored:
         meta += f" · {ignored} ignored"
     dotnet = sum(1 for _ in _dotnet_repos())
