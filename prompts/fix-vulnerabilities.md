@@ -1,14 +1,17 @@
 # Fix dependency vulnerabilities in {{REPO_NAME}}
 
-You are being run by **recap** in `{{REPO}}` because its security digest has a
-row for **{{PACKAGE}}** that the user wants cleared.
+You are being run by **recap** in `{{REPO}}`.
 
-- advisory: {{ADVISORY}}
 - package manager: **{{TOOL}}**
 - advisories reported when recap last audited: **{{COUNT}}**
+- selected row: **{{PACKAGE}}** — {{ADVISORY}}
 
-Your job is to clear as many advisories as you safely can, stop and ask before
-anything that could break the project, and prove afterwards that it still works.
+**Scope: {{SCOPE}}**
+
+{{GOAL}}
+
+Either way: stop and ask before anything that could break the project, and
+prove afterwards that it still works.
 
 ## Ground rules
 

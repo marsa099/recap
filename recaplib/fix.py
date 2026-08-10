@@ -65,7 +65,7 @@ def _dirty_manifest(path):
     return [ln[3:].strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
 
 
-def _render_prompt(path, name, tool, pkg, title, count):
+def _render_prompt(path, name, tool, pkg, title, count, scope="row"):
     """Fill in prompts/fix-vulnerabilities.md for this repo."""
     here = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     tpl_path = os.path.join(here, "prompts", "fix-vulnerabilities.md")
@@ -79,7 +79,19 @@ def _render_prompt(path, name, tool, pkg, title, count):
         audit_cmd, fix_cmd = "npm audit", "npm audit fix --package-lock-only"
         note = ("`--package-lock-only` keeps `node_modules` untouched, so the change "
                 "is a readable lockfile diff.")
+    if scope == "repo":
+        scope_line = "every advisory in this repository"
+        goal = ("Clear as many of this repo's advisories as you safely can — not just "
+                "the selected row. Work through them by severity, highest first, and "
+                "group anything that shares a required bump so you ask once rather "
+                "than five times.")
+    else:
+        scope_line = f"the advisory on **{pkg}** (fix anything else that falls out for free)"
+        goal = ("Clear the selected row with the smallest change that does it. If other "
+                "advisories are resolved by the same bump, good — but do not go hunting "
+                "the rest of the repo; the user has `fr` for that.")
     for k, v in {
+        "{{SCOPE}}": scope_line, "{{GOAL}}": goal,
         "{{REPO}}": path, "{{REPO_NAME}}": name, "{{TOOL}}": tool,
         "{{PACKAGE}}": pkg or "(unspecified)", "{{ADVISORY}}": title or "(none recorded)",
         "{{COUNT}}": str(count), "{{AUDIT_CMD}}": audit_cmd,
@@ -89,7 +101,7 @@ def _render_prompt(path, name, tool, pkg, title, count):
     return tpl
 
 
-def fix_in_terminal(it, dry_run=False):
+def fix_in_terminal(it, dry_run=False, scope="row"):
     """Hand the job to a coding agent in a kitty window.
 
     A shell script can only offer a fixed menu, and the interesting cases are
@@ -120,16 +132,18 @@ def fix_in_terminal(it, dry_run=False):
     count = len(cached.get("findings") or [])
     prompt = _render_prompt(path, name, tool, it.get("sub") or "",
                             it.get("title", "")[:200],
-                            f"{count} ({it.get('sev') or 'unknown'} on this row)")
+                            f"{count} ({it.get('sev') or 'unknown'} on this row)",
+                            scope=scope)
     if dry_run:
-        return True, f"[dry] {agent} in {name} ({len(prompt)} char prompt)"
+        return True, f"[dry] {agent} in {name}, scope={scope} ({len(prompt)} chars)"
 
     term = os.environ.get("TERMINAL") or "kitty"
     argv = ([term, "--working-directory", path, agent, prompt]
             if os.path.basename(term) == "kitty" else [term, "-e", agent, prompt])
     subprocess.Popen(argv, start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return True, f"{agent} is on {name}"
+    return True, (f"{agent} is on all of {name}" if scope == "repo"
+                  else f"{agent} is on {name}")
 
 
 def fix_item(it, dry_run=False):

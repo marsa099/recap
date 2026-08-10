@@ -22,7 +22,8 @@ recap show --lane work # work only
 recap show --ids       # with item ids, for `recap act`
 recap act <id> read    # read | archive | trash | star
 recap fix <id>         # security: apply the dependency bump headlessly
-recap fix <id> --term  # ...or hand it to a coding agent in a terminal (this is what `ff` does)
+recap fix <id> --term         # hand it to a coding agent in a terminal (`ff`)
+recap fix <id> --term --repo  # ...targeting every advisory in that repo (`fr`)
 recap term <id>        # security: open a terminal in that row's repo
 recap undo             # undo the last action
 recap providers        # what's wired up, and whether it's reachable
@@ -76,6 +77,11 @@ Design notes worth knowing:
   `prompts/fix-vulnerabilities.md` with the row's context (repo, package
   manager, advisory, current count) and starts `claude` — or whatever
   `security.fix_agent` names — in a kitty window in that repo.
+
+  Two scopes: **`ff`** clears the selected row with the smallest change that
+  does it, **`fr`** goes after every advisory in the same repo, worst first,
+  grouping anything that shares a required bump so it asks once rather than
+  five times.
 
   The prompt is where the policy lives, so it is editable without touching
   code: stay in this repo, manifests only, **ask before any major bump or

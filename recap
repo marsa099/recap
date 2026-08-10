@@ -188,8 +188,11 @@ def cmd_fix(args):
     if not it:
         print(f"no item {args.id} in the snapshot", file=sys.stderr)
         return 1
-    fn = fix_in_terminal if args.term else fix_item
-    ok, note = fn(it, dry_run=args.dry_run)
+    if args.term:
+        ok, note = fix_in_terminal(it, dry_run=args.dry_run,
+                                   scope="repo" if args.repo else "row")
+    else:
+        ok, note = fix_item(it, dry_run=args.dry_run)
     print(note, file=sys.stdout if ok else sys.stderr)
     if ok and not args.dry_run and not args.term:
         # Re-derive the security section so the fixed row leaves the digest.
@@ -267,6 +270,8 @@ def main():
     x.add_argument("id")
     x.add_argument("--dry-run", action="store_true",
                    help="say what would run without touching the repo")
+    x.add_argument("--repo", action="store_true",
+                   help="target every advisory in the repo, not just this row")
     x.add_argument("--term", action="store_true",
                    help="run it in a terminal so you can see the output and act on it")
     x.set_defaults(fn=cmd_fix)
