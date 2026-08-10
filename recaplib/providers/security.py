@@ -7,7 +7,10 @@ it safe to hang off the refresh timer.
 
 Noise control matters more here than anywhere else: a security section that
 cries wolf gets ignored inside a week. Low-severity and dev-only findings are
-collapsed into one row instead of getting their own.
+collapsed into one row instead of getting their own, and findings you cannot
+act on — no fix published, or a `fixAvailable` that points at an older version
+than the one installed — rank below the ones you can. Demoted, never dropped:
+they stay in the collapsed tail, because "unfixable" is itself worth knowing.
 """
 from __future__ import annotations
 
@@ -49,6 +52,69 @@ def _lockfile(path):
     return None, None
 
 
+def _lock_versions(path):
+    """package name -> installed version, from package-lock.json.
+
+    Read from the lockfile, not node_modules: the audit runs with
+    --package-lock-only, so node_modules need not exist at all.
+    """
+    try:
+        with open(os.path.join(path, "package-lock.json")) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for p, meta in (data.get("packages") or {}).items():
+        if not p.startswith("node_modules/") or "/node_modules/" in p:
+            continue                      # top-level copies only
+        v = meta.get("version") if isinstance(meta, dict) else None
+        if v:
+            out[p.split("node_modules/", 1)[1]] = v
+    return out
+
+
+def _older(a, b):
+    """True if version a is strictly older than b. Best effort, never raises."""
+    def parts(v):
+        try:
+            return [int(x) for x in str(v).split("+")[0].split("-")[0].split(".")]
+        except (TypeError, ValueError):
+            return None
+    pa, pb = parts(a), parts(b)
+    if pa is None or pb is None:
+        return False
+    return pa < pb
+
+
+def _actionable(fix, versions):
+    """Can this advisory be resolved by moving *forward*?
+
+    npm answers "what fixes this" with `fixAvailable`. When the version it names
+    is older than what is installed, that "fix" is a downgrade — a regression in
+    a remedy's clothing (expo 56 -> 53, react-native 0.85 -> 0.72). Those, and
+    advisories with no fix at all, are not things you can act on, and they should
+    not outrank one you could clear this afternoon.
+
+    Anything unrecognised counts as actionable: demoting on a guess is exactly
+    how a real advisory goes unread.
+
+    npm is not consistent here — the same repo can report `fixAvailable: true`
+    on a warm run and a downgrade target on a cold one, and `true` does not
+    guarantee `npm audit fix` changes anything. That only ever costs an extra
+    visible row, never a hidden one, which is the direction to err in.
+    """
+    if fix is None:                       # older cache, or pnpm — unknown
+        return True
+    if isinstance(fix, bool):
+        return fix
+    if isinstance(fix, dict):
+        cur, tgt = versions.get(fix.get("name")), fix.get("version")
+        if not cur or not tgt:
+            return True
+        return not _older(tgt, cur)
+    return True
+
+
 def _ghsa(url, fallback=""):
     """The advisory id from its URL — the only stable identity an advisory has.
 
@@ -63,19 +129,20 @@ def _ghsa(url, fallback=""):
 
 
 def _fields(f):
-    """(severity, package, title, url, [ghsa, ...]) from one cached finding.
+    """(severity, package, title, url, [ghsa, ...], actionable) from a finding.
 
-    Findings cached by an older recap are 4-tuples with no advisory ids; pad
-    them rather than forcing every repo to be re-audited on upgrade. A package
-    flagged only because a *dependency* is vulnerable has no id of its own, so
-    it falls back to its own name — still stable, unlike a count.
+    Findings cached by an older recap are 4- or 5-tuples; pad them rather than
+    forcing every repo to be re-audited on upgrade. A package flagged only
+    because a *dependency* is vulnerable has no id of its own, so it falls back
+    to its own name — still stable, unlike a count.
     """
-    f = list(f) + [None] * (5 - len(f))
-    sev, pkg, title, url, ids = f[:5]
+    f = list(f) + [None] * (6 - len(f))
+    sev, pkg, title, url, ids, act = f[:6]
     if isinstance(ids, str):
         ids = [ids]
     ids = [i for i in (ids or []) if i]
-    return sev, pkg, title, url or "", ids or [_ghsa(url or "", pkg)]
+    return (sev, pkg, title, url or "", ids or [_ghsa(url or "", pkg)],
+            True if act is None else bool(act))
 
 
 def _audit(path, tool, timeout):
@@ -92,6 +159,7 @@ def _audit(path, tool, timeout):
         return None
 
     found = []
+    versions = _lock_versions(path) if tool == "npm" else {}
     # npm 7+ shape
     for name, v in (data.get("vulnerabilities") or {}).items():
         if not isinstance(v, dict):
@@ -105,13 +173,14 @@ def _audit(path, tool, timeout):
         # package must not collapse to one identity.
         ids = [i for i in (_ghsa(x.get("url") or "", "") for x in dicts) if i]
         found.append((sev, name, first.get("title") or f"advisory in {name}",
-                      url, ids or [name]))
-    # pnpm / npm 6 shape
+                      url, ids or [name],
+                      _actionable(v.get("fixAvailable"), versions)))
+    # pnpm / npm 6 shape — no fixAvailable, so actionability is unknown (None)
     for _, a in (data.get("advisories") or {}).items():
         url = a.get("url", "")
         mod = a.get("module_name", "?")
         found.append((a.get("severity", "info"), mod, a.get("title", ""), url,
-                      [_ghsa(url, mod)]))
+                      [_ghsa(url, mod)], None))
     return found
 
 
@@ -190,22 +259,31 @@ def collect(force=False):
             ignored += 1
             continue
         by_pkg = {}
-        for sev, pkg, title, url, ids in (_fields(f) for f in r["findings"]):
+        for sev, pkg, title, url, ids, act in (_fields(f) for f in r["findings"]):
             if RANK.get(sev, 4) > floor:
                 low_count += 1
                 continue
             e = by_pkg.setdefault(pkg, {"sev": sev, "titles": [], "url": url,
-                                        "ids": set()})
+                                        "ids": set(), "act": False})
             if RANK.get(sev, 4) < RANK.get(e["sev"], 4):
                 e["sev"] = sev
             e["titles"].append(title)
             e["url"] = e["url"] or url
             e["ids"].update(ids)
+            # One fixable advisory is enough to make the row worth acting on.
+            e["act"] = e["act"] or act
         for pkg, e in by_pkg.items():
             rows.append((RANK.get(e["sev"], 4), name, pkg, e, r))
 
-    # 1. severity  2. last commit, newest first  3. stable tiebreak
-    rows.sort(key=lambda t: (t[0], -(t[4].get("last_commit") or 0), t[1], t[2]))
+    # 1. can you act on it  2. severity  3. last commit, newest first  4. stable
+    #
+    # Actionability outranks severity deliberately. A high you can clear in a
+    # minute deserves the slot more than a high whose only "fix" is a downgrade
+    # you will never apply — those are demoted, not dropped, so they still show
+    # up in the "+ more" line rather than vanishing.
+    rows.sort(key=lambda t: (not t[3]["act"], t[0],
+                             -(t[4].get("last_commit") or 0), t[1], t[2]))
+    unactionable = sum(1 for t in rows if not t[3]["act"])
     shown, hidden = rows[:max_rows], rows[max_rows:]
 
     out = []
@@ -226,7 +304,7 @@ def collect(force=False):
             title=title,
             summary=("; ".join(t for t in e["titles"][:3]) if n > 1 else "")
                     + (" · stale, last good scan" if r.get("stale") else ""),
-            when=e["sev"].capitalize(),
+            when=e["sev"].capitalize() + ("" if e["act"] else " · no fix"),
             ts=r.get("last_commit") or 0,
             accent="red" if e["sev"] in ("critical", "high") else "yellow",
             sev=e["sev"],
@@ -234,7 +312,9 @@ def collect(force=False):
             priority=e["sev"] == "critical",
             goto={"kind": "url", "url": e["url"] or
                   f"https://github.com/advisories?query={pkg}"},
-            actions=["read", "trash", "star", "fix"],
+            # No `fix` offered when the only bump on record goes backwards —
+            # the action would either no-op or propose a downgrade.
+            actions=["read", "trash", "star"] + (["fix"] if e["act"] else []),
         ))
 
     if hidden:
@@ -263,6 +343,8 @@ def collect(force=False):
     meta = f"{len(results)} repos, {audited} rescanned"
     if low_count:
         meta += f" · {low_count} below {min_sev} suppressed"
+    if unactionable:
+        meta += f" · {unactionable} unactionable"
     if ignored:
         meta += f" · {ignored} ignored"
     dotnet = sum(1 for _ in _dotnet_repos())

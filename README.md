@@ -69,10 +69,18 @@ Design notes worth knowing:
   findings. Advisories collapse per package, rank by severity, and only the
   worst `security.max_rows` get a row — the tail becomes one honest "N further
   advisories" line. Nothing is ever silently truncated.
-- **Security ordering is severity, then last commit descending.** Among equally
-  severe findings the repo you touched yesterday outranks one you last built in
-  2023. `last_commit` is recomputed every sweep, not frozen at audit time, so a
-  repo rises the moment you commit to it even with cached advisories.
+- **Security ordering is actionability, then severity, then last commit
+  descending.** Among equally severe findings the repo you touched yesterday
+  outranks one you last built in 2023. `last_commit` is recomputed every sweep,
+  not frozen at audit time, so a repo rises the moment you commit to it even
+  with cached advisories.
+- **An advisory you cannot act on ranks below one you can.** npm sometimes
+  answers "what fixes this" with a version *older* than the one installed —
+  `expo 56 → 53`, `react-native 0.85 → 0.72`. That is a downgrade, not a fix, so
+  those rows (and any with no fix at all) lose the `fix` action, are marked
+  `· no fix`, and sort last into the collapsed tail. Demoted, never dropped:
+  an unfixable advisory is still worth knowing about. When npm's answer is
+  ambiguous the row stays actionable — erring toward showing, never hiding.
 - **`fix` hands the job to a coding agent**, not a fixed menu. `ff` renders
   `prompts/fix-vulnerabilities.md` with the row's context (repo, package
   manager, advisory, current count) and starts `claude` — or whatever
@@ -135,7 +143,13 @@ work_interests = ["dotnet", "azure"]
 max_rows = 10
 max_age_hours = 12
 ignore_repos = ["teams-for-linux"]
+min_severity = "moderate"              # own row at or above this; rest counted in one line
 ```
+
+`min_severity` takes `critical`/`high`/`moderate`/`low`/`info` and defaults to
+`moderate`. Raising it is a blunt instrument — severity describes the bug, not
+your exposure to it, so `critical` also hides every genuine high. The
+actionability demotion above is usually the knob you actually wanted.
 
 ## Addons
 
