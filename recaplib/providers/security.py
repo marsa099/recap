@@ -49,8 +49,37 @@ def _lockfile(path):
     return None, None
 
 
+def _ghsa(url, fallback=""):
+    """The advisory id from its URL — the only stable identity an advisory has.
+
+    Package name, severity and advisory *count* all churn for reasons that have
+    nothing to do with which bug is being reported, so none of them can carry a
+    dismissal. A GHSA id can.
+    """
+    tail = (url or "").rstrip("/").rsplit("/", 1)[-1]
+    if tail.startswith(("GHSA-", "CVE-")):
+        return tail
+    return fallback or url or ""
+
+
+def _fields(f):
+    """(severity, package, title, url, [ghsa, ...]) from one cached finding.
+
+    Findings cached by an older recap are 4-tuples with no advisory ids; pad
+    them rather than forcing every repo to be re-audited on upgrade. A package
+    flagged only because a *dependency* is vulnerable has no id of its own, so
+    it falls back to its own name — still stable, unlike a count.
+    """
+    f = list(f) + [None] * (5 - len(f))
+    sev, pkg, title, url, ids = f[:5]
+    if isinstance(ids, str):
+        ids = [ids]
+    ids = [i for i in (ids or []) if i]
+    return sev, pkg, title, url or "", ids or [_ghsa(url or "", pkg)]
+
+
 def _audit(path, tool, timeout):
-    """Return [(severity, package, title, url)] or None if the audit failed."""
+    """Return [(severity, package, title, url, ghsa)] or None if the audit failed."""
     cmd = (["pnpm", "audit", "--json"] if tool == "pnpm"
            else ["npm", "audit", "--package-lock-only", "--json"])
     try:
@@ -69,13 +98,20 @@ def _audit(path, tool, timeout):
             continue
         sev = v.get("severity", "info")
         via = v.get("via") or []
-        first = next((x for x in via if isinstance(x, dict)), {})
+        dicts = [x for x in via if isinstance(x, dict)]
+        first = dicts[0] if dicts else {}
+        url = first.get("url") or ""
+        # Every advisory on this package, not just the first — two bugs in one
+        # package must not collapse to one identity.
+        ids = [i for i in (_ghsa(x.get("url") or "", "") for x in dicts) if i]
         found.append((sev, name, first.get("title") or f"advisory in {name}",
-                      first.get("url") or ""))
+                      url, ids or [name]))
     # pnpm / npm 6 shape
     for _, a in (data.get("advisories") or {}).items():
-        found.append((a.get("severity", "info"), a.get("module_name", "?"),
-                      a.get("title", ""), a.get("url", "")))
+        url = a.get("url", "")
+        mod = a.get("module_name", "?")
+        found.append((a.get("severity", "info"), mod, a.get("title", ""), url,
+                      [_ghsa(url, mod)]))
     return found
 
 
@@ -148,15 +184,17 @@ def collect(force=False):
             ignored += 1
             continue
         by_pkg = {}
-        for sev, pkg, title, url in r["findings"]:
+        for sev, pkg, title, url, ids in (_fields(f) for f in r["findings"]):
             if RANK.get(sev, 4) >= 3:
                 low_count += 1
                 continue
-            e = by_pkg.setdefault(pkg, {"sev": sev, "titles": [], "url": url})
+            e = by_pkg.setdefault(pkg, {"sev": sev, "titles": [], "url": url,
+                                        "ids": set()})
             if RANK.get(sev, 4) < RANK.get(e["sev"], 4):
                 e["sev"] = sev
             e["titles"].append(title)
             e["url"] = e["url"] or url
+            e["ids"].update(ids)
         for pkg, e in by_pkg.items():
             rows.append((RANK.get(e["sev"], 4), name, pkg, e, r))
 
@@ -172,7 +210,11 @@ def collect(force=False):
             source="security",
             lane=r["lane"],
             section="Security",
-            key=f"{name}:{pkg}:{e['sev']}:{n}",
+            # Identity is the set of advisories, not how many there are. Keying
+            # on the count let a *replacement* advisory (one fixed, one new,
+            # count unchanged) silently inherit an earlier dismissal.
+            key=f"{name}:{pkg}:" + (",".join(sorted(e["ids"]))
+                                    or f"{e['sev']}:{n}"),
             who=name,
             sub=pkg,
             title=title,
@@ -241,5 +283,5 @@ def _dotnet_repos():
 
 def act(it, action):
     if action == "trash":
-        return True, "advisory dismissed until its version changes"
+        return True, "advisory dismissed until a different one is reported"
     return True, action

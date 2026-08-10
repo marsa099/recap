@@ -61,8 +61,8 @@ def apply_state(items):
         if s:
             it["state"].update(s)
         # A dismissed item stays gone until its identity changes — for an
-        # advisory that means until the version moves, since the version is
-        # part of the provider key.
+        # advisory that means until the set of GHSA ids moves, since those ids
+        # are the provider key.
         if it["state"].get("gone"):
             continue
         out.append(it)
