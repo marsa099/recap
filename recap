@@ -49,7 +49,12 @@ def cmd_refresh(args):
     # must not trigger a 2-minute `npm audit` sweep.
     only = set(args.only.split(",")) if getattr(args, "only", "") else None
     prev = snapshot.load_snapshot() if only else {"items": [], "meta": {}}
-    items = [i for i in prev["items"] if i["source"].split(":")[0] not in only] if only else []
+    # Filter on the *provider* that produced each item, not its source: the
+    # chat provider emits items sourced "tmqs"/"dsqrd"/..., so matching on
+    # source kept every stale chat row and appended fresh ones next to it.
+    items = ([i for i in prev["items"]
+              if i.get("provider", i["source"].split(":")[0]) not in only]
+             if only else [])
     meta = dict(prev["meta"]) if only else {}
     for name, mod in PROVIDERS:
         if only and name not in only:
@@ -62,6 +67,8 @@ def cmd_refresh(args):
             got, note = [item.stale_notice(
                 name, name.capitalize(), item.PRIVATE,
                 f"{name} provider crashed", f"{e.__class__.__name__}: {e}")], "crashed"
+        for one in got:
+            one["provider"] = name
         items.extend(got)
         meta[name] = {"note": note, "count": len(got), "ms": int((time.time() - t0) * 1000)}
         if not args.quiet:
@@ -70,6 +77,8 @@ def cmd_refresh(args):
 
     if not only or "addons" in only:
         got, note = addons.collect()
+        for one in got:
+            one["provider"] = "addons"
         items.extend(got)
         meta["addons"] = {"note": note, "count": len(got), "ms": 0}
 
